@@ -1,0 +1,158 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Accounts
+// ---------------------------------------------------------------------------
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique // login ID
+  authHash           String // Argon2id digest of the login password (hex)
+  authSalt           String // hex salt used for the auth hash
+  kekSalt            String // hex salt used to derive the key-encryption-key
+  wrappedDekUser     String // vault DEK wrapped (AES-256-GCM) with the password-derived KEK
+  wrappedDekServer   String // vault DEK wrapped (AES-256-GCM) with the server master key (enables sharing)
+  mustChangePassword Boolean  @default(false)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  credentials  Credential[]
+  groups       Group[]
+  notes        Note[]
+  activities   Activity[]
+  grantsOwned  ShareGrant[] @relation("ShareOwner")
+  grantsGiven  ShareGrant[] @relation("ShareGrantee")
+}
+
+// ---------------------------------------------------------------------------
+// Vault
+// ---------------------------------------------------------------------------
+model Credential {
+  id            String    @id @default(cuid())
+  ownerId       String
+  title         String
+  url           String?   @db.Text
+  usernameEnc   String?   @db.Text // AES-256-GCM
+  emailEnc      String?   @db.Text // AES-256-GCM (optional, separate from username)
+  passwordEnc   String?   @db.Text // AES-256-GCM
+  notesEnc      String?   @db.LongText // AES-256-GCM
+  passwordHmac  String? // HMAC-SHA256 of the password for duplicate detection (irreversible)
+  groupId       String?
+  tags          String    @default("[]") @db.VarChar(2048) // JSON string array
+  favorite      Boolean   @default(false)
+  status        String    @default("in_process") // in_process | complete | transferred
+  statusRemarks String?   @db.Text // mandatory when status = transferred
+  deletedAt     DateTime? // soft delete -> Trash
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  owner User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  group Group? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId, deletedAt])
+  @@index([ownerId, groupId])
+}
+
+model Group {
+  id        String   @id @default(cuid())
+  ownerId   String
+  name      String
+  color     String   @default("#10b981")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner       User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  credentials Credential[]
+
+  @@unique([ownerId, name])
+}
+
+// Vault sharing: owner grants grantee access to the owner's vault
+model ShareGrant {
+  id        String   @id @default(cuid())
+  ownerId   String
+  granteeId String
+  canWrite  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  owner   User @relation("ShareOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  grantee User @relation("ShareGrantee", fields: [granteeId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, granteeId])
+}
+
+// ---------------------------------------------------------------------------
+// Activity feed
+// ---------------------------------------------------------------------------
+model Activity {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String
+  detail    String?  @db.Text
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Notepad (Memos-inspired: markdown timeline, tags inline, pinned)
+// ---------------------------------------------------------------------------
+model Note {
+  id        String    @id @default(cuid())
+  ownerId   String
+  content   String   @db.LongText // markdown body; #tags are parsed from it
+  pinned    Boolean   @default(false)
+  deletedAt DateTime? // soft delete -> Notepad Trash
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  owner       User         @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  attachments Attachment[]
+
+  @@index([ownerId, deletedAt])
+  @@index([ownerId, pinned])
+}
+
+// Small attachments referenced by notes (stored encrypted-at-rest via the DB file)
+model Attachment {
+  id        String   @id @default(cuid())
+  noteId    String
+  name      String
+  mime      String
+  size      Int
+  dataB64   String   @db.LongText
+  createdAt DateTime @default(now())
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId])
+}
+
+// ---------------------------------------------------------------------------
+// Secure QR login: short-lived, single-use pairing tokens (PC <-> mobile)
+// The QR payload contains ONLY the opaque pairing token — never passwords or
+// session secrets. The PC session is minted server-side after explicit
+// approval by an authenticated device.
+// ---------------------------------------------------------------------------
+model LoginPairing {
+  id            String    @id @default(cuid())
+  tokenHash     String    @unique // SHA-256 of the pairing token
+  deviceLabel   String // browser/OS description of the PC that requested login
+  ip            String
+  status        String    @default("pending") // pending | approved | denied | expired | consumed
+  sessionToken  String? // token of the pre-created PC session (set on approval)
+  approvedById  String?
+  createdAt     DateTime  @default(now())
+  expiresAt     DateTime
+  updatedAt     DateTime  @updatedAt
+
+  @@index([status, expiresAt])
+}
